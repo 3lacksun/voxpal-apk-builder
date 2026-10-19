@@ -1,0 +1,96 @@
+name: Build VoxPal APK
+
+# Public CI runner for the VoxPal Android release APK.
+#
+# Why this repository exists: GitHub Actions minutes are free and unlimited for
+# public repositories, but the private mirror 3lacksun/voxpal-apk has exhausted
+# its private-repository minute allowance, so its own workflow jobs never start.
+#
+# The application source is NOT published here. It is uploaded as an asset on a
+# DRAFT release in this repository; draft releases are not publicly visible, and
+# the build job reads the asset with this repository's own GITHUB_TOKEN.
+#
+# To build a new revision: replace the asset on the draft release, then run this
+# workflow (Actions -> Build VoxPal APK -> Run workflow).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Assemble release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Fetch private source snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/srcpkg src
+          gh release download voxpal-src \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'voxpal-src.tar.gz' \
+            --dir /tmp/srcpkg
+          ls -lh /tmp/srcpkg
+          tar xzf /tmp/srcpkg/voxpal-src.tar.gz -C src
+          echo "--- snapshot contents ---"
+          ls -a src | head -30
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.12.0 --activate
+          pnpm --version
+
+      - name: Install dependencies
+        working-directory: src
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Generate native Android project
+        working-directory: src
+        run: npx expo prebuild --platform android --no-install
+        env:
+          EXPO_NO_TELEMETRY: '1'
+
+      - name: Install Android NDK and CMake
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "Android SDK: $SDK"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.1.12297006" "cmake;3.22.1"
+          ls "$SDK/ndk" || true
+
+      - name: Build release APK
+        working-directory: src/android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4096m -Dorg.gradle.daemon=false'
+          EXPO_NO_TELEMETRY: '1'
+
+      - name: Locate built APK
+        run: |
+          find src/android/app/build/outputs -name "*.apk" -type f -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxpal-release-apk
+          path: src/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
